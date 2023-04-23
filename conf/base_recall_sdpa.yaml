@@ -1,0 +1,43 @@
+Features:
+  feature_group:
+    label_feature: [1, 2, 3]
+    user_sparse: [0, 4, ..., 71]
+    ad_sparse: [72, ..., 231]
+  feature_fields: [group, type, tower, deal, vocab, embedding_dim, pooling, working]  # 不可修改，固定的field
+  features:
+    user_sparse,str,user,hashing,100000,8,sum,true
+    ad_sparse,str,ad,hashing,100000,8,sum,true
+    label_feature,str,label,null,null,-1,null,true
+
+Variables:
+  vocabs: {}
+  seeds: [2022, 2023]
+
+Networks:
+  class: models.matching.dssm.Dssm
+  loss: backend.losses.match_losses.cosent_loss
+  embedding_dim: 512
+  embedding_pooling: sum
+
+Task:
+  task: sdpa_recall
+  dayno: 20230214
+  dayno_conf: {train: $dayno-14, valid: 0.1, eval: $dayno+:1}
+
+Datasets:
+  train_data: hdfs://bc-hdfs/hive-dw/ad/tag/sdpa/sample/daily/base_base/YYYYMMDD_features_tfr
+  test_data: hdfs://bc-hdfs/hive-dw/ad/tag/sdpa/sample/daily/test_base_base/YYYYMMDD_features_tfr
+  model_save_root: /home/notebook/data/group/sihao_work/browse_recall/model_recall/weights/recall_sdpa/
+
+Train:
+  data: $train_data
+  epoch: 20
+  batch_size: 1024
+  thread_num: 4
+
+Experiments:
+  feature_exp:
+    no_del: []
+    del_sug_and_desc: []
+  experiment_fields: []
+  experiments:

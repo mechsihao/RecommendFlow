@@ -1,3 +1,5 @@
+from functools import partial
+
 import tensorflow as tf
 from tensorflow.keras import backend as K
 
@@ -99,7 +101,8 @@ def pos_aux_label_cosent_loss(y_true, aux_true, query, doc, scale=20):
     比较适合的辅助指标有：
         - 出价bid（也可以是bid分箱后再对比，这里要注意，必须得让bid本身是可比的，比如可以让大家都换算成ocpc bid，越深度转化bid越高，因此需要统一转化下）
         - ecpm = bid * ctr
-        - 其它业务指标
+        - 质量分数
+        - item=user的交叉相似度？
     因此该loss只要是想让某些业务指标排序靠前的时候都可以使用
     :param y_true: 0/1 label
     :param aux_true: 辅助label
@@ -122,9 +125,9 @@ def batch_neg_sample_ce_loss(y_true, query, doc):
     实现batch内负采样，公式为：
     loss𝑖 = −(1/n) * Sigma(y_true·log(y_pred) + (1-y_true)·log(1-y_pred))
     """
-    y_true = tf.linalg.diag(y_true)
+    y_true_mat = tf.linalg.diag(y_true)
     y_pred = tf.matmul(query, tf.transpose(doc))
-    return tf.reduce_mean(K.categorical_crossentropy(y_true, y_pred) * tf.linalg.diag_part(y_true))
+    return tf.reduce_mean(K.categorical_crossentropy(y_true_mat, y_pred) * y_true)
 
 
 @tf.function
@@ -221,3 +224,26 @@ def batch_hard_neg_sample_margin_rank_loss(y_true, query, doc, margin=0.1):
 
     loss = tf.clip_by_value(y_sub, 0, 1e14) * y_true
     return tf.reduce_sum(loss)
+
+
+def batch_softmax_probabilistic_combining_soft(batch_size, miu=0.6):
+    @tf.function
+    def batch_spc_soft(y_true, query, doc, xi, miu_):
+        y_pred = tf.matmul(query, tf.transpose(doc))
+        y_pos = tf.linalg.diag_part(y_pred)
+        y_neg_cos = tf.linalg.set_diag(y_pred, tf.zeros_like(y_pos))
+        y_pos_pred = tf.linalg.diag(tf.exp(y_pos))
+
+        inf = 1e14  # 利用exp(-inf) = 0来过滤掉不想要的部分
+        y_pos_pseudo_mask1 = tf.cast(y_neg_cos < xi, tf.float32) * -inf  # shape: [batch, batch]
+        y_pos_pseudo_mask2 = tf.expand_dims(tf.cast(y_pos > miu_, tf.float32) * -inf, axis=1)  # shape: [batch, 1]
+        y_pos_pseudo = y_neg_cos + y_pos_pseudo_mask1 + y_pos_pseudo_mask2
+        y_pos_pseudo_pred = tf.exp(y_pos_pseudo)
+
+        y_pos_pred += y_pos_pseudo_pred
+        y_pred = tf.exp(y_pred)
+        softmax = tf.reduce_sum(y_pos_pred, axis=1) / tf.reduce_sum(y_pred, axis=1)
+        # 最后输出需要过滤掉batch中额外加入的负样本。
+        # 为什么会有负样本加入？请移步笔者的另一篇文章：https://zhuanlan.zhihu.com/p/574752588
+        return tf.reduce_mean(-tf.math.log(softmax) * tf.squeeze(y_true))
+    return partial(batch_spc_soft, xi=1/batch_size, miu_=miu)

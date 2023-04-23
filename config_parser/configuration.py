@@ -1,15 +1,16 @@
 """
-创建人：MECH
+创建人：MECH (80302421)
 创建时间：2021/12/19
 功能描述：解析yaml配置文件，解析配置文件中的配置并替换配置文件中的变量替换符为'$'，因此需要避免正常的字符串中有这个符号
 """
+import yaml
+import pandas as pd
 
 from typing import Any, Dict, List
-import pandas as pd
-import yaml
-from config_parser.config_utils import is_punctuation
 from config_parser.features import Features
 from utils.str_parser import str2dict, str2list
+from config_parser.config_proto import FeatureDeal
+from config_parser.config_utils import is_punctuation
 
 
 class Configuration(object):
@@ -26,13 +27,12 @@ class Configuration(object):
 
         self._init_global_conf()
         self._rematch_global_conf()
-
         self.features = Features(self.conf, self.get_conf_value("vocabs"), self.get_conf_value("seeds"))
 
         self.networks = self.conf["Networks"] if 'Networks' in self.conf else {}
         self.exp_conf = self.conf["Experiments"] if 'Experiments' in self.conf else None
 
-        if not self.exp_conf:
+        if not self.exp_conf or not self.exp_conf["experiments"]:
             self.experiment_field = []
             self.experiments = pd.DataFrame()
         else:
@@ -41,6 +41,8 @@ class Configuration(object):
             assert self.experiment_field[0] == "exp_id", "The first field must be exp_id"
             experiments = pd.DataFrame([self._parse_exp(exp) for exp in self.exp_conf["experiments"]], columns=self.experiment_field)
             self.experiments = experiments.set_index("exp_id")
+
+        self.need_parse_second = self.features.contain_deal(FeatureDeal.Image) or self.features.contain_deal(FeatureDeal.Embedding)
 
     @property
     def train_features(self):
@@ -83,18 +85,20 @@ class Configuration(object):
             for exp in features:
                 # 优先处理name层级，其次处理field层级
                 if exp[0] == "+":
-                    if self.features.contains(exp[1:]):
+                    if self.features.contain(exp[1:]):
                         self.features.set_feature_valid(name=exp[1:])
                     else:
                         self.features.set_feature_valid(field=exp[1:])
                 elif exp[0] == "-":
-                    if self.features.contains(exp[1:]):
+                    if self.features.contain(exp[1:]):
                         # 优先处理name层级，其次处理field层级
                         self.features.set_feature_invalid(name=exp[1:])
                     else:
                         self.features.set_feature_invalid(field=exp[1:])
                 else:
                     raise ValueError("Feature first latter must be '+/-' represent feature valid/invalid.")
+        # 激活实验后需要重新计算下需要二次解析的特征
+        self.need_parse_second = self.features.contain_deal(FeatureDeal.Image) or self.features.contain_deal(FeatureDeal.Embedding)
         return self.experiments.loc[exp_id].to_dict()
 
     def get_conf_value(self, key: str, dtype: type = None):
@@ -159,7 +163,9 @@ class Configuration(object):
 
     def _init_global_conf(self):
         self.conf["Features"]["features"] = [[i for i in line.split(",")] for line in self.conf["Features"]["features"].split()]
-        self.conf["Experiments"]["experiments"] = [[i for i in line.split(",")] for line in self.conf["Experiments"]["experiments"].split()]
+        self.conf["Experiments"]["experiments"] = [
+            [i for i in line.split(",")] for line in self.conf["Experiments"]["experiments"].split()
+        ] if self.conf["Experiments"]["experiments"] else []
 
     def _rematch_global_conf(self):
         """

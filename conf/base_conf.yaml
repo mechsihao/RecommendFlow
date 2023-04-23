@@ -1,0 +1,116 @@
+Features:
+  feature_group:
+    query: [query_tok_id, query_seg_id]
+    query_sug: [query_sug_tok_id, query_sug_seg_id]
+    query_nlp_token: [query_2gram, query_3gram, query_token]
+    app_name: [app_name_tok_id, app_name_seg_id]
+    app_desc: [app_desc_tok_id, app_desc_seg_id]
+    app_nlp_token: [app_kws, app_name_2gram, app_name_3gram, app_name_token, app_desc_token]
+    exp_disc: [app_all_exp, app_avg_exp]
+    down_disc: [app_all_down, app_avg_down]
+    income_disc: [app_all_income, app_avg_income]
+  feature_fields: [group, type, tower, deal, vocab, embedding_dim, pooling, working]  # 不可修改，固定的field
+  features:
+    query,int,user,token_id,null,-1,first,true
+    query_sug,int,user,token_id,null,-1,first,false
+    sc,str,user,null,null,-1,null,false
+    query_nlp_token,str,user,hashing,5000,16,sum,false
+    clk_app_ids,str,user,hashing,3000,16,sum,false
+    clk_app_kws,str,user,hashing,5000,16,sum,false
+    clk_ad_2cat_ids,int,user,lookup,$ad_cat2,16,sum,false
+    clk_ad_3cat_ids,int,user,lookup,$ad_cat3,16,sum,false
+    clk_shop_2cat_ids,int,user,lookup,$shop_cat2,16,sum,false
+    clk_shop_3cat_ids,int,user,lookup,$shop_cat3,16,sum,false
+    app_name,int,ad,token_id,null,-1,first,true
+    app_desc,int,ad,token_id,null,-1,first,false
+    app_id,str,ad,hashing,3000,16,sum,true
+    app_nlp_token,str,ad,hashing,5000,16,sum,false
+    developer_id,str,ad,hashing,1000,16,sum,false
+    app_shop_2cat_id,int,ad,lookup,$shop_cat2,16,sum,false
+    app_shop_3cat_id,int,ad,lookup,$shop_cat3,16,sum,false
+    app_ad_2cat_id,int,ad,lookup,$ad_cat2,16,sum,false
+    app_ad_3cat_id,int,ad,lookup,$ad_cat3,16,sum,false
+    top_cat,str,ad,lookup,$top_cat,16,sum,false
+    app_qv,float,ad,discrete,$qv_disc,16,sum,false
+    exp_disc,float,ad,discrete,$exp_disc,16,sum,false
+    down_disc,float,ad,discrete,$down_disc,16,sum,false
+    income_disc,float,ad,discrete,$income_disc,16,sum,false
+    app_avg_ctr,float,ad,discrete,$ctr_disc,16,sum,false
+    label,float,label,numeric,null,-1,null,true
+    down,float,null,numeric,null,-1,null,true
+
+Variables:
+  vocabs:
+    qv_disc: [3, 10, 50, 100]
+    pv_disc: [50, 100, 1000, 5000]
+    exp_disc: [10, 100, 1000, 10000]
+    down_disc: [5, 10, 100, 1000]
+    income_disc: [50, 100, 1000, 10000]
+    ctr_disc: [0.002, 0.005, 0.01, 0.05]
+    top_cat: [game, app]
+    ad_cat2: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/market/vocabs/ad_cat2_vocab.csv
+    ad_cat3: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/market/vocabs/ad_cat3_vocab.csv
+    shop_cat2: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/market/vocabs/shop_cat2_vocab.csv
+    shop_cat3: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/market/vocabs/shop_cat3_vocab.csv
+    tokens: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/market/vocabs/token_vocab.csv
+  seeds: [2022, 2023]
+
+Networks:
+  class: models.matching.siamese_bert.BertModel
+  loss: backend.losses.match_losses.cosent_loss
+  embedding_dim: 512
+  embedding_pooling: sum
+  bert_conf:
+    conf_path: /home/notebook/data/group/sihao_work/browse_recall/model_recall/data/pretrain_model/roberta/small/bert_config.json
+    ckpt_path: /home/notebook/data/group/sihao_work/browse_recall/model_recall/data/pretrain_model/roberta/small/bert_model.ckpt
+    vocab_path: /home/notebook/data/group/sihao_work/browse_recall/model_recall/data/pretrain_model/roberta/small/vocab.txt
+    pooling: cls
+    finetune: True
+    out_layer: -1
+    max_len: None
+    dim: 312
+
+Task:
+  task: browse_search
+  dayno: 20230210
+  dayno_conf:
+    7days: {train: $dayno-7, valid: 0.1, eval: $dayno+:1}
+    30days: {train: $dayno-30, valid: 0.1, eval: $dayno+:1}
+
+Datasets:
+  train_data1: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/$task/daily_train/YYYYMMDD/train_tfr_neg_10_exp5_ctr_002
+  train_data2: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/$task/daily_train/YYYYMMDD/train_tfr_neg10
+  train_data3: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/$task/daily_train/YYYYMMDD/train_tfr_neg20
+  eval_data: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/$task/daily_train/YYYYMMDD/train_tfr_neg0
+  smt_eval_data: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/$task/daily_semantic/YYYYMMDD/smt_tfr
+  app_cand_data: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/$task/daily_app_cand/YYYYMMDD/app_cand_tfr
+
+Train:
+  data: $train_data1
+  epoch: 20
+  batch_size: 1024
+  thread_num: 4
+
+Evaluate:
+  batch_size: 1024
+  thread_num: 4
+  metrics:
+
+Infer:
+  infer_data: hdfs://ad-hdfs/hive-dw/ad/tag/recall_search/que2search/$task/daily_infer/YYYYMMDD/app_cand_tfr
+  batch_size: 2048
+  thread_num: 4
+
+Experiments:
+  feature_exp:
+    no_del: []
+    del_sug_and_desc: [-query_sug_tok_id, -query_sug_seg_id, -app_desc_tok_id, -app_desc_seg_id]
+  experiment_fields: [exp_id, loss, train_data, dayno_conf, features]
+  experiments:
+    0,cosent,$train_data1,$7days,$del_sug_and_desc
+    1,cosent,$train_data2,$7days,$del_sug_and_desc
+    2,cosent,$train_data2,$30days,$del_sug_and_desc
+    3,cosent,$train_data3,$7days,$del_sug_and_desc
+    4,cosent,$train_data3,$30days,$del_sug_and_desc
+    3,cosent,$train_data3,$7days,$no_del
+    4,cosent,$train_data3,$30days,$no_del

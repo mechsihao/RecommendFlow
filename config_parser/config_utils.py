@@ -3,6 +3,9 @@ import os
 import unicodedata
 from typing import Dict, Any
 
+from utils.util import read_csv
+from config_parser.config_proto import SUPPORT_TYPE
+
 
 def load_config(config_path):
     return parse_json_config(config_path, True)
@@ -13,6 +16,21 @@ def save_config(config_path, conf):
     """
     with open(config_path, 'w') as f:
         json.dump(conf, f)
+
+
+def load_slot_map(slot_map_path):
+    """
+    导入slot映射，只需要配置相应id即可
+    :param slot_map_path:
+    :return:
+    """
+    vocab = read_csv(slot_map_path, sep=":", cache_data=True, columns=["name", "dtype", "slot"])
+    name_type_dic = {}
+    for name, dtype, slot in vocab.values:
+        dtype = str(dtype).lower()
+        assert dtype in SUPPORT_TYPE, f"Unsupported type {dtype}"
+        name_type_dic[int(slot)] = [str(name), dtype]
+    return name_type_dic
 
 
 def print_conf(conf_path):

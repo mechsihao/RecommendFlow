@@ -1,5 +1,5 @@
 """
-创建人：MECH
+创建人：MECH (80302421)
 创建时间：2021/12/19
 功能描述：负责配置文件中的特征解析
 """
@@ -7,23 +7,11 @@
 import os
 from typing import Dict, List, Union, Any
 
-import tensorflow as tf
-
 from case_class.case_class import CaseClass
-from config_parser.config_proto import FeatureTower, FeatureDeal, FeaturePooling
-from utils.hdfs_util import ls_hdfs_paths
+from config_parser.config_proto import *
 from utils.str_parser import str2list
 from utils.util import read_csv
-from config_parser.config_utils import load_vocab
-
-
-TYPE_INT = "int"
-TYPE_FLOAT = "float"
-TYPE_STR = "str"
-
-SUPPORT_TYPE = [TYPE_INT, TYPE_FLOAT, TYPE_STR]
-TYPE_MAP = {TYPE_INT: tf.int32, TYPE_FLOAT: tf.float32, TYPE_STR: tf.string}
-DEFAULT_MAP = {TYPE_INT: 0, TYPE_FLOAT: 0.0, TYPE_STR: ""}
+from config_parser.config_utils import load_vocab, load_slot_map
 
 
 class Feature(CaseClass):
@@ -34,7 +22,7 @@ class Feature(CaseClass):
                  tower: FeatureTower,
                  deal: FeatureDeal,
                  vocab_size: int = -1,
-                 embedding_dim: int = None,
+                 embedding_dim: int = -1,
                  pooling: FeaturePooling = FeaturePooling("null"),
                  working: bool = True,
                  vocabs: Union[List[str], str] = None,
@@ -54,19 +42,13 @@ class Feature(CaseClass):
         self.hash_seeds = seeds
 
     def is_auto_vocabs(self):
-        return self.vocabs == "__AUTO__"
+        return self.vocabs.upper() == "__AUTO__"
 
     def is_token_id(self):
         return self.deal == FeatureDeal.TokenId
 
     def is_lookup(self):
         return self.deal == FeatureDeal.Lookup
-
-    def is_string_lookup(self):
-        return self.deal == FeatureDeal.StringLookup
-
-    def is_int_lookup(self):
-        return self.deal == FeatureDeal.IntegerLookup
 
     def is_hashing(self):
         return self.deal == FeatureDeal.Hashing
@@ -89,6 +71,23 @@ class Feature(CaseClass):
     def __hash__(self):
         return hash(self.name)
 
+    def __gt__(self, other):
+        return self.name > other.name if hasattr(other, "name") else self.name > other
+
+    def __eq__(self, other):
+        """
+        一个Feature的name就可以直接代替该feature做很多运算符操作，比如查字典
+        举例：
+        >>> label = Feature('label', 'label', 'float', FeatureTower.Label, FeatureDeal.Numeric, -1, -1, FeaturePooling.Null, True, "", None)
+        >>> a = {"label": [1.0, 0.0, 1.0, 0.0], "app_id": [3463412, 134123412, 123423, 2345], ... }
+        >>> a[label]
+        Out[0]: [1.0, 0.0, 1.0, 0.0]
+        """
+        return self.name == other.name if hasattr(other, "name") else self.name == other
+
+    def __lt__(self, other):
+        return self.name <= other.name if hasattr(other, "name") else self.name < other
+
 
 class Features(object):
     """
@@ -97,10 +96,12 @@ class Features(object):
         - name: 特征名称
         - type: 特征类型，只能是int、float、str三种，都是多值特征
         - tower: 塔标识，对于多塔模型，该值只有
+        - ...
     """
 
-    def __init__(self, conf, vocabs_map: Dict[str, Any] = None, seeds: Union[int, List[int]] = None):
+    def __init__(self, conf, vocabs_map: Dict[str, Any] = None, seeds: Union[int, List[int]] = None, slot_map_path: str = None):
         self.conf = conf
+        self.slot_map = load_slot_map(slot_map_path) if slot_map_path else {}
 
         feature_fields = conf['Features']['feature_fields']
         self.field_names = feature_fields if isinstance(feature_fields, list) else str2list(feature_fields)
@@ -125,22 +126,38 @@ class Features(object):
         return self.get_tower_features("user")
 
     @property
+    def user_feature_names(self):
+        return self.get_tower_features("user", True)
+
+    @property
     def ad_features(self):
         return self.get_tower_features("ad")
+
+    @property
+    def ad_feature_names(self):
+        return self.get_tower_features("ad", True)
 
     @property
     def context_features(self):
         return self.get_tower_features("context")
 
     @property
+    def context_feature_names(self):
+        return self.get_tower_features("context", True)
+
+    @property
     def labels(self):
         return self.get_tower_features("label")
 
+    @property
+    def label_names(self):
+        return self.get_tower_features("label", True)
+
     def __check_feature_exist(self, name: str):
-        assert self.contains(name), f"Feature={name} dose not exists."
+        assert self.contain(name), f"Feature={name} dose not exists."
 
     def __check_feature_field_exist(self, field: str):
-        assert self.contains_field(field), f"Feature field={field} dose not exists."
+        assert self.contain_field(field), f"Feature field={field} dose not exists."
 
     def __init_features(self) -> List[Feature]:
         res, res_name = [], {}
@@ -148,12 +165,12 @@ class Features(object):
             feature_list = self.__parse_feature(conf)
             for feature in feature_list:
                 if feature.name in res_name:
+                    # 为了检验是否存在冲突的特征名，特征名一定不允许冲突！
                     raise Exception(f"Feature: [{self.field_names[0]}='{feature.field_name}', name='{feature.name}'] was conflicted with "
                                     f"Feature: [{self.field_names[0]}='{res_name[feature.name]}', name='{feature.name}']")
                 else:
                     res_name[feature.name] = feature.field_name
             res.extend(feature_list)
-
         return res
 
     @staticmethod
@@ -179,8 +196,7 @@ class Features(object):
             return vocab
         elif isinstance(vocab, str):
             if read:
-                path = ls_hdfs_paths(vocab)[0] if vocab.startswith("hdfs://") else vocab
-                vocab = read_csv(path, sep="\t", cache_data=True, columns=["vocab_id", "vocab_name"]).astype(str)
+                vocab = read_csv(vocab, sep="\t", cache_data=True, columns=["vocab_id", "vocab_name"]).astype(str)
                 vocab = vocab[vocab.columns[0]].unique().tolist()
                 self.vocabs_map[vocab_name] = vocab
                 return vocab
@@ -189,13 +205,27 @@ class Features(object):
         else:
             raise Exception(f"Vocab={vocab_name}, value={vocab}, type={type(vocab)}, expect list or string.")
 
-    def __parse_feature(self, conf_str: str) -> List[Feature]:
-        d = {f: v for f, v in zip(self.field_names, conf_str)}
-        assert len(d) == len(self.field_names), f"Conf_str = {conf_str} is invalid, please check."
+    def __parse_feature(self, conf_list: List[str]) -> List[Feature]:
+        d = {f: v for f, v in zip(self.field_names, conf_list)}
+        assert len(d) == len(self.field_names), f"Conf_str = {conf_list} is invalid, please check."
 
         field = d[self.field_names[0]].lower()
         name_list = self.feature_group[field] if field in self.feature_group else [field]
-        ftype = d["type"].lower()
+
+        if [name for name in name_list if isinstance(name, int)]:
+            assert self.slot_map, f"If you want to set feature slot id to locate feature, you must prepare slot map file."
+
+        while "..." in name_list:
+            # 允许是[1, 4, 6, ..., 45] 这种表达方式，但是...前后必须是数字才行
+            ell_id = name_list.index("...")
+            start, end = name_list[ell_id - 1], name_list[ell_id + 1]
+            assert isinstance(start, int) and isinstance(end, int), f"Except int, got start={start}, end={end}."
+            assert start < end, f"Got start={start}, end={end}, start must smaller than end."
+            name_list = name_list[: max(0, ell_id - 2)] + list(range(start, end + 1)) + name_list[ell_id + 2:]
+
+        set_ftype = d["type"].lower()
+        self.__check_slot_id(field, name_list)
+        name_type_list = [self.slot_map[name] if isinstance(name, int) else [name, set_ftype] for name in name_list]
         tower = FeatureTower(d["tower"].lower())
         deal = FeatureDeal(d["deal"].lower())
         pooling = FeaturePooling(d["pooling"].lower())
@@ -203,11 +233,10 @@ class Features(object):
         seeds = self.seeds if deal == FeatureDeal.Hashing else None
         vocab = d["vocab"].lower() if isinstance(d["vocab"], str) else d["vocab"]
         dim = -1 if deal in (
-            FeatureDeal.Numeric, FeatureDeal.Null, FeatureDeal.TokenId, FeatureDeal.Image,
-            FeatureDeal.Embedding, FeatureDeal.BertEncode
+            FeatureDeal.Numeric, FeatureDeal.Null, FeatureDeal.TokenId, FeatureDeal.Image, FeatureDeal.Embedding, FeatureDeal.BertEncode
         ) else int(d["embedding_dim"])
 
-        if deal in [FeatureDeal.StringLookup, FeatureDeal.IntegerLookup, FeatureDeal.Discrete] and status:
+        if deal in [FeatureDeal.Lookup, FeatureDeal.Discrete] and status:
             # 这里故意设置为不论该特征是否有效都要校验vocab设置，防止配置文件乱配置
             if not isinstance(vocab, str):
                 vocabs = vocab
@@ -243,7 +272,12 @@ class Features(object):
         else:
             vocabs = None
             vocab_size = -1
-        return [Feature(name, field, ftype, tower, deal, vocab_size, dim, pooling, status, vocabs, seeds) for name in name_list]
+        return [Feature(name, field, ftype, tower, deal, vocab_size, dim, pooling, status, vocabs, seeds) for name, ftype in name_type_list]
+
+    def __check_slot_id(self, filed_name, name_list):
+        for name in name_list:
+            if isinstance(name, int) and name not in self.slot_map:
+                raise Exception(f"Feature: [group={filed_name}, slot_id={name}] was not in slot_map_file, please check!")
 
     def get_tower_features(self, tower: str, name_only: bool = False):
         return [feature.name if name_only else feature for feature in self.train_features if feature.tower == FeatureTower(tower)]
@@ -251,7 +285,7 @@ class Features(object):
     def get_deal_features(self, deal: str, name_only: bool = False):
         return [feature.name if name_only else feature for feature in self.train_features if feature.deal == FeatureDeal(deal)]
 
-    def get_fields_map(self, name_rlike: str = None, tower: str = None, deal: str = None, name_only: bool = False, train_only: bool = True):
+    def get_fields_map(self, name_rlike: str = None, tower: str = None, deal: str = None, name_only: bool = False, train_only=True):
         res: Dict[str, List[Union[Feature, str]]] = {}
         for feature in self.train_features if train_only else self.features:
             if filter_feature(feature, flag=name_rlike, tower=tower, deal=deal):
@@ -261,14 +295,27 @@ class Features(object):
                     res[feature.field_name].append(feature.name if name_only else feature)
         return res
 
+    def get_fields_map_except(self, name_rlike: str = None, tower: str = None, deal: str = None, name_only=False, train_only=True):
+        res: Dict[str, List[Union[Feature, str]]] = {}
+        for feature in self.train_features if train_only else self.features:
+            if except_feature(feature, flag=name_rlike, tower=tower, deal=deal):
+                if feature.field_name not in res:
+                    res[feature.field_name] = [feature.name if name_only else feature]
+                else:
+                    res[feature.field_name].append(feature.name if name_only else feature)
+        return res
+
     def get_fields(self, name_rlike: str = None, tower: str = None, deal: str = None, train_only: bool = True):
         return list(self.get_fields_map(name_rlike, tower, deal, True, train_only).keys())
 
-    def index_of_fields(self, fields_list: List[str], name_rlike: str = None, tower: str = None, deal: str = None, train_only: bool = True):
+    def get_fields_except(self, name_rlike: str = None, tower: str = None, deal: str = None, train_only: bool = True):
+        return list(self.get_fields_map_except(name_rlike, tower, deal, True, train_only).keys())
+
+    def index_of_fields(self, fields_list: List[str], name_rlike: str = None, tower: str = None, deal: str = None, train_only=True):
         all_field_list = self.get_fields(name_rlike, tower, deal, train_only)
         return [all_field_list.index(i) for i in fields_list]
 
-    def get_fields_feature_group(self, name_rlike: str = None, tower: str = None, deal: str = None, name_only=False, train_only=True):
+    def get_fields_feature_tuple(self, name_rlike: str = None, tower: str = None, deal: str = None, name_only=False, train_only=True):
         return list(self.get_fields_map(name_rlike, tower, deal, name_only, train_only).values())
 
     def get_feature(self, name: str):
@@ -278,17 +325,17 @@ class Features(object):
         else:
             return features[0]
 
-    def get_features(self, name_rlike: str = None, field: str = None, tower: str = None, deal: str = None, train_only: bool = True):
+    def get_features(self, name_rlike: str = None, field: str = None, tower: str = None, deal: str = None, train_only=True):
         return self.feature_filter(name_rlike, field, tower, deal, train_only)
 
     def index_of_features(self, names: List[str], name_rlike: str = None, field: str = None, tower: str = None, deal=None, train_only=True):
         all_features = [f.name for f in self.feature_filter(name_rlike, field, tower, deal, train_only)]
         return [all_features.index(name) for name in names]
 
-    def feature_filter(self, name_rlike: str = None, field: str = None, tower: str = None, deal: str = None, train_only: bool = True):
+    def feature_filter(self, name_rlike: str = None, field: str = None, tower: str = None, deal: str = None, train_only=True):
         return [f for f in list(self.train_features if train_only else self.features) if filter_feature(f, name_rlike, field, tower, deal)]
 
-    def feature_except(self, name_rlike: str = None, field: str = None, tower: str = None, deal: str = None, train_only: bool = True):
+    def feature_except(self, name_rlike: str = None, field: str = None, tower: str = None, deal: str = None, train_only=True):
         return [f for f in list(self.train_features if train_only else self.features) if except_feature(f, name_rlike, field, tower, deal)]
 
     def get_features_by_name(self, names: List[str] = None, prefix: str = "", suffix: str = ""):
@@ -300,11 +347,12 @@ class Features(object):
             return [feature for feature in self.train_features if feature.name.endswith(suffix)]
         else:
             raise ValueError("Names, prefix or suffix must given only one.")
-
+    
     def __set_attr_by_deal_fun(self):
         for deal in FeatureDeal.__members__.values():
             if deal != FeatureDeal.Null:
                 self.__setattr__(f"{deal.value}_features", self.get_deal_features(deal.value))
+                self.__setattr__(f"{deal.value}_feature_names", self.get_deal_features(deal.value, True))
 
     def __set_feature_status(self, name: str = "", field: str = "", status: bool = True):
         assert name or field, "Name or field must given at least one of them"
@@ -321,11 +369,14 @@ class Features(object):
     def set_feature_invalid(self, name: str = "", field: str = ""):
         self.__set_feature_status(name, field, status=False)
 
-    def contains(self, name: str) -> bool:
-        return len([f for f in self.features if f.name == name]) != 0
+    def contain(self, name: str) -> bool:
+        return len([f for f in self.train_features if f.name == name]) != 0
 
-    def contains_field(self, field: str) -> bool:
-        return len([f for f in self.features if f.field_name == field]) != 0
+    def contain_field(self, field: str) -> bool:
+        return len([f for f in self.train_features if f.field_name == field]) != 0
+
+    def contain_deal(self, deal: FeatureDeal) -> bool:
+        return len([f for f in self.train_features if f.deal == deal]) != 0
 
     def get_image_features(self):
         return self.get_deal_features("image")
@@ -340,9 +391,9 @@ def filter_feature(feature: Feature, flag: str = None, field: str = None, tower:
     ret = True
     if flag and [f for f in flag.split("|") if f not in feature.name]:
         ret = False
-    if tower and [t for t in tower.split("|") if feature.tower != FeatureTower(t)] :
+    if tower and [t for t in tower.split("|") if feature.tower != FeatureTower(t)]:
         ret = False
-    if deal and [d for d in deal.split("|") if feature.tower != FeatureDeal(d)]:
+    if deal and [d for d in deal.split("|") if feature.deal != FeatureDeal(d)]:
         ret = False
     if field and [f for f in field.split("|") if feature.field_name != f]:
         ret = False
@@ -357,7 +408,7 @@ def except_feature(feature: Feature, flag: str = None, field: str = None, tower:
         ret = False
     if tower and [t for t in tower.split("|") if feature.tower == FeatureTower(t)]:
         ret = False
-    if deal and [d for d in deal.split("|") if feature.tower == FeatureDeal(d)]:
+    if deal and [d for d in deal.split("|") if feature.deal == FeatureDeal(d)]:
         ret = False
     if field and [f for f in field.split("|") if feature.field_name == f]:
         ret = False
